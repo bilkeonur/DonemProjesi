@@ -1,0 +1,6 @@
+@NidsBackendAPI_HostAddress = http://localhost:5030
+
+GET {{NidsBackendAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
