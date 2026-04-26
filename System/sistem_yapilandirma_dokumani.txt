@@ -1,0 +1,136 @@
+NIDS Projesi: Ağ Geçidi, Ağ İzleme ve Zigbee Altyapısı Yapılandırma Dokümantasyonu
+Bu dokümantasyon, Raspberry Pi üzerinde bir Güvenlik Ağ Geçidi (Security Gateway) oluşturulması, ağ trafiğinin izlenmesi için gerekli altyapının kurulması ve uç nokta IoT cihazlarından (ESP32-H2 vb.) veri toplayabilmek için Zigbee/MQTT haberleşme mimarisinin yapılandırılması adımlarını içermektedir.
+
+1. Sistem Hazırlığı ve Güncelleme
+İşletim sisteminin paket listelerini yenilemek ve tüm sistemi en güncel kararlı sürüme yükseltmek için aşağıdaki komutlar uygulanmıştır.
+
+Bash
+# Paket listelerini günceller
+sudo apt update
+
+# Çekirdek (kernel) dahil tüm sistem paketlerini yükseltir
+sudo apt full-upgrade -y
+
+# Güncellemelerin aktif olması için sistemi yeniden başlatır
+sudo reboot
+2. Ağ Geçidi (Access Point ve NAT) Kurulumu
+Raspberry Pi'nin dahili Wi-Fi modülünün bir erişim noktası (AP) olarak çalışması ve özellikle ESP32 gibi IoT cihazlarının sorunsuz bağlanabilmesi için Türkiye bölge ayarları yapılmış, yazılımsal kilitler kaldırılmış ve güvenlik protokolleri (WPA2, AES-CCMP) katı bir şekilde sınırlandırılmıştır.
+
+Bash
+# Wi-Fi regülasyonunu Türkiye (TR) olarak ayarlar
+sudo raspi-config nonint do_wifi_country TR
+
+# Yazılımsal radyo frekans kilitlerini (rfkill) kaldırır
+sudo rfkill unblock all
+
+# Ağ yöneticisi servisini yeni ayarlar ile yeniden başlatır
+sudo systemctl restart NetworkManager
+
+# 'NIDS_Lab_Network' adında, wlan0 arayüzünü kullanan ve otomatik bağlanan bir Wi-Fi profili oluşturur
+sudo nmcli con add type wifi ifname wlan0 con-name NIDS_AP autoconnect yes ssid NIDS_Lab_Network
+
+# Ağ modunu 'Erişim Noktası' (AP), bandı 2.4 GHz (bg) ve IP dağıtımını 'Paylaşımlı' (DHCP/NAT) olarak ayarlar
+sudo nmcli con modify NIDS_AP 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared
+
+# Güvenlik protokolünü WPA2 olarak tanımlar ve parolayı belirler
+sudo nmcli con modify NIDS_AP wifi-sec.key-mgmt wpa-psk
+sudo nmcli con modify NIDS_AP wifi-sec.psk "GuvenliSifre2026"
+
+# ESP32 CİHAZLARININ BAĞLANTI SORUNUNU ÇÖZMEK İÇİN YAPILAN ÖZEL YAPILANDIRMALAR:
+# PMF'yi (Protected Management Frames) devre dışı bırakır (Eski IoT cihazları ile uyumluluk için)
+sudo nmcli con modify NIDS_AP 802-11-wireless-security.pmf 1
+
+# Modemlerle frekans çakışmasını önlemek için bağlantı kanalını 6 olarak sabitler
+sudo nmcli con modify NIDS_AP 802-11-wireless.channel 6
+
+# Güvenlik protokolünü sadece WPA2 (RSN) olarak zorunlu kılar
+sudo nmcli con modify NIDS_AP 802-11-wireless-security.proto rsn
+
+# Şifreleme algoritmalarını donanımsal olarak desteklenen AES (CCMP) olarak sınırlandırır
+sudo nmcli con modify NIDS_AP 802-11-wireless-security.group ccmp
+sudo nmcli con modify NIDS_AP 802-11-wireless-security.pairwise ccmp
+
+# Yapılandırılan ağ geçidi profilini başlatır ve yayını açar
+sudo nmcli con up NIDS_AP
+3. Ağ Trafiği Analizi (Sniffing) Altyapısının Kurulumu
+Oluşturulan Wi-Fi ağı üzerinden geçen paketlerin rota analizini yapabilmek için gerekli sistem kütüphaneleri kurulmuş ve izole bir Python sanal ortamı hazırlanmıştır.
+
+Bash
+# Ağ analizi için gerekli C kütüphanelerini ve sanal ortam paketini kurar
+sudo apt install python3-venv tcpdump libpcap-dev -y
+
+# Proje dizinini oluşturur ve içine girer
+mkdir ~/nids_project
+cd ~/nids_project
+
+# Sistemin ana Python paketlerini etkilememek için izole bir sanal ortam oluşturur
+python3 -m venv nids_env
+
+# Sanal ortamı aktif hale getirir
+source nids_env/bin/activate
+
+# Ağ paketlerini yakalamak ve manipüle etmek için Scapy kütüphanesini kurar
+pip install scapy
+
+# İlgili Python analiz betiği oluşturulduktan sonra (sniff_test.py), yönetici yetkileriyle testi başlatır
+sudo ~/nids_project/nids_env/bin/python ~/nids_project/sniff_test.py
+4. Evrensel Zigbee Koordinatörü (CC2531) ve MQTT Altyapısı
+ESP32 uç noktalarından gelen Zigbee verilerini işlemek üzere donanım izinleri ayarlanmış, MQTT Broker (Mosquitto) kurulmuş ve Zigbee2MQTT yazılımı derlenmiştir.
+
+4.1. Donanım İzinleri ve Mosquitto (MQTT) Broker Kurulumu
+Bash
+# CC2531 modülünün sisteme hangi porttan (/dev/ttyACM0) bağlandığını doğrular
+ls -l /dev/ttyACM*
+
+# Mevcut kullanıcıyı (onurbilke), USB seri portlarına şifresiz erişebilmesi için 'dialout' grubuna ekler
+sudo usermod -a -G dialout onurbilke
+newgrp dialout
+
+# Hafif sıklet MQTT haberleşme aracını sisteme kurar
+sudo apt update
+sudo apt install mosquitto mosquitto-clients -y
+
+# Mosquitto'yu başlangıçta otomatik çalışacak şekilde ayarlar ve başlatır
+sudo systemctl enable mosquitto
+sudo systemctl start mosquitto
+
+# ZIGBEE CİHAZLARININ BAĞLANTI SORUNUNU ÇÖZMEK İÇİN MOSQUITTO YAPILANDIRMASI:
+# Mosquitto yapılandırma dosyasını açar (İçerisine 'listener 1883 0.0.0.0' ve 'allow_anonymous true' satırları eklenir)
+sudo nano /etc/mosquitto/mosquitto.conf
+
+# Yapılan yetkilendirme ve port ayarlarının geçerli olması için servisi yeniden başlatır
+sudo systemctl restart mosquitto
+4.2. Çalışma Ortamı (Node.js) ve Zigbee2MQTT Kurulumu
+Bash
+# Zigbee2MQTT'nin güncel gereksinimlerini karşılamak için Node.js'in (v20.x) resmi deposunu ekler
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+
+# Node.js ortamını ve derleme araçlarını (g++, gcc, make) sisteme kurar
+sudo apt install -y nodejs git make g++ gcc
+
+# Yazılımın kurulacağı dizini oluşturur ve kullanıcıya yetki verir
+sudo mkdir /opt/zigbee2mqtt
+sudo chown -R onurbilke: /opt/zigbee2mqtt
+
+# Zigbee2MQTT yazılımını Github üzerinden yerel dizine klonlar
+git clone --depth 1 https://github.com/Koenkk/zigbee2mqtt.git /opt/zigbee2mqtt
+
+# Klonlanan dizine geçiş yapar
+cd /opt/zigbee2mqtt
+
+# Modern bağımlılık yönetimi için pnpm paket yöneticisini global olarak kurar
+sudo npm install -g pnpm
+
+# Yazılımın çalışması için gerekli tüm bağımlılıkları indirir ve derler
+npm install
+4.3. Zigbee2MQTT Yapılandırması ve Başlatılması
+Bash
+# Zigbee ağının izinleri, port ayarları ve MQTT haberleşmesi için konfigürasyon dosyasını düzenler
+nano /opt/zigbee2mqtt/data/configuration.yaml
+(Not: Bu dosyaya donanım portu /dev/ttyACM0, frontend portu 8080, MQTT sunucusu mqtt://localhost ve yeni cihaz ekleme izni permit_join: true parametreleri eklenmiştir.)
+
+Bash
+# Kurulum ve yapılandırma tamamlandıktan sonra Zigbee2MQTT uygulamasını başlatır
+cd /opt/zigbee2mqtt
+npm start
+(Not: Sistem başarıyla başlatıldıktan sonra http://<Raspberry_Pi_IP_Adresi>:8080/ adresi üzerinden web arayüzüne girilmiş, "Katılmaya İzin Ver" (Permit Join) seçeneği aktif edilerek Zigbee cihazı ağa başarıyla dahil edilmiştir.)
